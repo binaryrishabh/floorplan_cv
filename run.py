@@ -1,6 +1,7 @@
 # entry point: python run.py floorplan.pdf
-# two passes now: first collect doors per sheet, then kill the sheet
-# furniture false positives, then render + annotate + reconcile
+# two passes now: first collect doors per sheet (rendering once so the
+# visibility check can look at real pixels), then kill the sheet
+# furniture false positives, then annotate + reconcile
 import json
 import os
 import sys
@@ -14,7 +15,7 @@ from shape_finder import find_swing_arcs, find_wall_gaps
 from matcher import match_doors
 from noise import drop_sheet_furniture
 from reconcile import reconcile
-from visualizer import annotate_page
+from visualizer import annotate_page, SCALE
 
 
 def main(pdf_path):
@@ -22,15 +23,18 @@ def main(pdf_path):
     os.makedirs(OUT_DIR, exist_ok=True)
     doc = open_doc(pdf_path)
 
-    # pass 1: pure extraction, no rendering yet
+    # pass 1: pure extraction, no annotation yet
     pages_doors = {}
     raw_stats = {}
+    pixs = {}
     for pno in range(len(doc)):
         page = doc[pno]
         drawings = page_drawings(page)
         spans = page_text_spans(page)
         badges = find_badges(drawings)
-        tags = find_tags(spans, badges)
+        pix = render_page(page, RENDER_DPI)
+        pixs[pno + 1] = pix
+        tags = find_tags(spans, badges, pix, SCALE)
         arcs = find_swing_arcs(drawings)
         gaps = find_wall_gaps(drawings)
         pages_doors[pno + 1] = match_doors(tags, arcs, gaps)
@@ -39,13 +43,12 @@ def main(pdf_path):
     # pass 2: throw out curves that repeat on 3+ sheets (title block etc)
     cleaned, dropped = drop_sheet_furniture(pages_doors)
 
-    # pass 3: render, annotate, report
+    # pass 3: annotate, report
     report = []
     for pno in sorted(cleaned):
         doors = cleaned[pno]
         tags_n, badges_n, arcs_n, gaps_n = raw_stats[pno]
-        pix = render_page(doc[pno - 1], RENDER_DPI)
-        img_path = annotate_page(pix, doors, pno)
+        img_path = annotate_page(pixs[pno], doors, pno)
         tagged = sum(1 for d in doors if d["tag"])
         print(f"sheet {pno}: {tags_n} tags ({badges_n} badges), {arcs_n} swings, "
               f"{gaps_n} wall gaps -> {tagged} tagged doors, "

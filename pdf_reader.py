@@ -1,7 +1,7 @@
 # thin wrapper around pymupdf so the rest of the code never touches
 # fitz directly. if we ever swap pdf libs only this file changes
-
 import pymupdf
+
 
 def open_doc(pdf_path):
     return pymupdf.open(pdf_path)
@@ -9,7 +9,9 @@ def open_doc(pdf_path):
 
 def page_text_spans(page):
     # every text run with its bbox. vector pdfs from cad give us
-    # perfect text here so we dont need to recieve anything from ocr
+    # perfect text here so we dont need to recieve anything from ocr.
+    # bbox is kept because the visibility check needs to know where
+    # on the rendered image the span claims to sit
     spans = []
     raw = page.get_text("dict")
     for block in raw.get("blocks", []):
@@ -23,6 +25,7 @@ def page_text_spans(page):
                     "text": txt,
                     "x": (x0 + x1) / 2.0,
                     "y": (y0 + y1) / 2.0,
+                    "bbox": (x0, y0, x1, y1),
                     "size": span.get("size", 0),
                 })
     return spans
