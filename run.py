@@ -9,6 +9,7 @@ import time
 from config import OUT_DIR, RENDER_DPI
 from pdf_reader import open_doc, page_text_spans, page_drawings, render_page
 from tag_finder import find_tags
+from badge_finder import find_badges
 from shape_finder import find_swing_arcs, find_wall_gaps
 from matcher import match_doors
 from noise import drop_sheet_furniture
@@ -27,11 +28,13 @@ def main(pdf_path):
     for pno in range(len(doc)):
         page = doc[pno]
         drawings = page_drawings(page)
-        tags = find_tags(page_text_spans(page))
+        spans = page_text_spans(page)
+        badges = find_badges(drawings)
+        tags = find_tags(spans, badges)
         arcs = find_swing_arcs(drawings)
         gaps = find_wall_gaps(drawings)
         pages_doors[pno + 1] = match_doors(tags, arcs, gaps)
-        raw_stats[pno + 1] = (len(tags), len(arcs), len(gaps))
+        raw_stats[pno + 1] = (len(tags), len(badges), len(arcs), len(gaps))
 
     # pass 2: throw out curves that repeat on 3+ sheets (title block etc)
     cleaned, dropped = drop_sheet_furniture(pages_doors)
@@ -40,15 +43,17 @@ def main(pdf_path):
     report = []
     for pno in sorted(cleaned):
         doors = cleaned[pno]
-        tags_n, arcs_n, gaps_n = raw_stats[pno]
+        tags_n, badges_n, arcs_n, gaps_n = raw_stats[pno]
         pix = render_page(doc[pno - 1], RENDER_DPI)
         img_path = annotate_page(pix, doors, pno)
         tagged = sum(1 for d in doors if d["tag"])
-        print(f"sheet {pno}: {tags_n} tags, {arcs_n} swings, {gaps_n} wall gaps "
-              f"-> {tagged} tagged doors, {len(doors) - tagged} untaged openings")
+        print(f"sheet {pno}: {tags_n} tags ({badges_n} badges), {arcs_n} swings, "
+              f"{gaps_n} wall gaps -> {tagged} tagged doors, "
+              f"{len(doors) - tagged} untaged openings")
         report.append({
             "page": pno,
             "tags": tags_n,
+            "badges": badges_n,
             "swing_arcs": arcs_n,
             "wall_gaps": gaps_n,
             "tagged_doors": tagged,

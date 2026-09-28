@@ -1,6 +1,5 @@
 # global knobs for the floorplan experiment. tweak these when a new
 # bid set comes in with a different scale or tag style
-import os
 import re
 
 # door tags on these sheets look like 1400, 1422, 1403A. keynotes are 6
@@ -42,6 +41,12 @@ OVERALL_PAGES = [1]
 STATIC_MIN_PAGES = 3
 STATIC_SNAP_PT = 6
 
-# absolute out folder next to this file, so a wierd working directory
-# or a relative path tantrum from windows can never break the saves
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+# door tag badges are little elongated hexagons drawn around the
+# number. these windows match their size at 1/4" and 1/8" scales
+BADGE_MIN_W_PT = 14
+BADGE_MAX_W_PT = 60
+BADGE_MIN_H_PT = 6
+BADGE_MAX_H_PT = 22
+BADGE_PAD_PT = 2
+
+OUT_DIR = "out"
