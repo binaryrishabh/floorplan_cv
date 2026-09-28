@@ -1,52 +1,75 @@
-# global knobs for the floorplan experiment. tweak these when a new
-# bid set comes in with a different scale or tag style
 import re
 
-# door tags on these sheets look like 1400, 1422, 1403A. keynotes are 6
-# digits and grid bubbles are 1-2 digits so they naturally fall out
-TAG_PATTERN = re.compile(r"^\d{3,4}[A-Z]?$")
-
-# render dpi for the annotated screenshots, 150 is plenty and keeps
-# the pngs small enough to share on discord
+# Door tags in this project family are usually room/door numbers. This remains
+# intentionally conservative; geometry, not the regex, creates doors.
+TAG_PATTERN = re.compile(r'^\d{3,5}[A-Z]?$')
 RENDER_DPI = 150
+OUT_DIR = 'out'
 
-# door swing arc sizes in pdf points. at 1/4" scale a 3ft door swing is
-# ~54pt, at 1/8" its ~27pt, so this window covers both plus pairs
-ARC_MIN_PT = 15
-ARC_MAX_PT = 110
+# ---------------- Physical geometry (feet) ----------------
+# Geometry thresholds are expressed in real-world feet and converted to PDF
+# points using each floor-plan view's drawing scale. This is the key change
+# from v4: no page numbers and no 1/4"-scale-specific door sizes.
+ARC_SEG_MIN_FT = 0.025
+ARC_SEG_MAX_FT = 0.667
+ARC_COMPONENT_MIN_SEGMENTS = 6
+ARC_COMPONENT_MAX_SEGMENTS = 25
+DOOR_LEAF_MIN_FT = 1.89
+DOOR_LEAF_MAX_FT = 4.78
+ARC_SPAN_MIN_DEG = 78.0
+ARC_SPAN_MAX_DEG = 100.0
+ARC_RMS_MAX_FT = 0.036
+ENDPOINT_SNAP_FT = 0.010
+LEAF_CENTER_TOL_FT = 0.222
+LEAF_ENDPOINT_TOL_FT = 0.222
+LEAF_RATIO_MIN = 0.72
+LEAF_RATIO_MAX = 1.30
 
-# a quarter circle swing is about as wide as tall, furniture curves
-# and site contours usually are not
-ARC_RATIO_MIN = 0.7
-ARC_RATIO_MAX = 1.4
+# CAD line weights are paper-space properties, so they stay in PDF points.
+ARC_STROKE_MAX_PT = 0.42
+LEAF_STROKE_MIN_PT = 0.55
+LEAF_STROKE_MAX_PT = 0.90
 
-# wall gap window. a door opening breaks the wall line by roughly the
-# door width, so hairline cracks and corridor mouths get ignored
-GAP_MIN_PT = 14
-GAP_MAX_PT = 90
+# Door-tag matching. Spatial radius is physical, while badge/text geometry is
+# paper-space and therefore stays in PDF points.
+TAG_RADIUS_FT = 4.0
+TAG_DEDUPE_PT = 1.0
 
-# how far a tag can sit from its swing arc or gap and still count as
-# the same door, architects put the badge just outside the swing
-MATCH_RADIUS_PT = 90
+# Intra-sheet duplicate geometry.
+DOOR_CENTER_DEDUPE_FT = 0.278
+DOOR_RADIUS_DEDUPE_FT = 0.222
 
-# short ticks and furniture lines just add noise to the wall graph
-WALL_MIN_LEN_PT = 60
+# Fallback leaf recovery (physical dimensions).
+TAG_AXIS_LEAF_MAX_DIST_FT = 1.78
+TAG_DIAG_LEAF_MAX_DIST_FT = 2.89
+LEAF_DUP_MID_FT = 0.194
+LEAF_DUP_LEN_FT = 0.167
+LEAF_DUP_ANGLE_DEG = 4.0
+DIAG_ANGLE_MARGIN_DEG = 12.0
+DOUBLE_PAIR_MAX_MID_DIST_FT = 5.28
+DOUBLE_PAIR_MAX_ENDPOINT_GAP_FT = 2.11
+FALLBACK_DOOR_DEDUPE_FT = 1.0
 
-# sheet 1 is the overall plan. founder said ignore it for counting, we
-# keep it only as the tag universe / index
-OVERALL_PAGES = [1]
+# Cross-sheet reconciliation.
+REG_MIN_SHARED_TAGS = 2
+REG_MAX_TAG_RESIDUAL_FT = 1.25
+CROSS_SHEET_MATCH_FT = 1.4
+CROSS_SHEET_RADIUS_RATIO_TOL = 0.35
+REG_SCALE_RATIO_TOL = 0.18
 
-# a curve printed at the same spot on 3+ sheets is sheet furniture like
-# titel block symbols or the north arrow, real doors never do that
-STATIC_MIN_PAGES = 3
-STATIC_SNAP_PT = 6
+# Visualization.
+MARKER_RADIUS_PX = 9
 
-# door tag badges are little elongated hexagons drawn around the
-# number. these windows match their size at 1/4" and 1/8" scales
-BADGE_MIN_W_PT = 14
-BADGE_MAX_W_PT = 60
-BADGE_MIN_H_PT = 6
-BADGE_MAX_H_PT = 22
-BADGE_PAD_PT = 2
+# Sheet classification. We process floor plans automatically rather than fixed
+# page numbers. Unknown sheets are skipped unless --include-unknown is used.
+FLOOR_POSITIVE = (
+    'FLOOR PLAN', 'ENLARGED PLAN', 'OVERALL PLAN', 'LEVEL PLAN',
+)
+FLOOR_NEGATIVE = (
+    'REFLECTED CEILING', 'RCP', 'ROOF PLAN', 'FINISH PLAN', 'DEMOLITION PLAN',
+    'ELEVATION', 'SECTION', 'DETAIL', 'DOOR SCHEDULE', 'WINDOW SCHEDULE',
+)
 
-OUT_DIR = "out"
+# Double-leaf recovery is reliable on detailed views; at lower scales it is
+# retained as a review candidate rather than counted automatically.
+LOW_DETAIL_DOUBLE_MIN_PPF = 13.5

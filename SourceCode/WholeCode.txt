@@ -1,0 +1,1332 @@
+### .gitignore
+out/
+__pycache__/
+*.pyc
+.venv/
+
+
+### badge_finder.py
+# door tags sit inside a little elongated hexagon badge on these sheets.
+# room numbers and keynotes are plain text with no shape around them,
+# so hunting for the badge shape is how we tell the two apart
+from config import (BADGE_MIN_W_PT, BADGE_MAX_W_PT,
+                    BADGE_MIN_H_PT, BADGE_MAX_H_PT, BADGE_PAD_PT)
+
+
+def _bbox_of(items):
+    xs = []
+    ys = []
+    for item in items:
+        for p in item[1:]:
+            if hasattr(p, "x"):
+                xs.append(p.x)
+                ys.append(p.y)
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def find_badges(drawings):
+    badges = []
+    for d in drawings:
+        items = d.get("items", [])
+        # a hexagon is a short closed polyline, 6-ish straight segments
+        if not (4 <= len(items) <= 10):
+            continue
+        if any(item[0] != "l" for item in items):
+            continue
+        bb = _bbox_of(items)
+        if bb is None:
+            continue
+        w = bb[2] - bb[0]
+        h = bb[3] - bb[1]
+        if not (BADGE_MIN_W_PT <= w <= BADGE_MAX_W_PT):
+            continue
+        if not (BADGE_MIN_H_PT <= h <= BADGE_MAX_H_PT):
+            continue
+        # closed loop: last point walks back to the first one
+        first = items[0][1]
+        last = items[-1][2]
+        if abs(first.x - last.x) > 1.0 or abs(first.y - last.y) > 1.0:
+            continue
+        badges.append(bb)
+    return badges
+
+
+def tag_inside_badge(x, y, badges):
+    for (x0, y0, x1, y1) in badges:
+        if (x0 - BADGE_PAD_PT <= x <= x1 + BADGE_PAD_PT
+                and y0 - BADGE_PAD_PT <= y <= y1 + BADGE_PAD_PT):
+            return True
+    return False
+
+### config.py
+import re
+
+# Rendering / output
+RENDER_DPI = 180
+OUT_DIR = "out"
+
+# Sheet selection
+ENLARGED_TITLE_RE = re.compile(r"ENLARGED\s+(?:LEVEL\s+\d+\s+)?FLOOR\s+PLAN", re.I)
+OVERALL_TITLE_RE = re.compile(r"OVERALL\s+FLOOR\s+PLAN", re.I)
+SHEET_LABEL_RE = re.compile(r"\bA2\.0?1[A-F]\b", re.I)
+
+# Door tag candidates. These labels are metadata only; text never creates a door.
+TAG_PATTERN = re.compile(r"^\d{3,4}[A-Z]?$", re.I)
+TAG_MAX_DISTANCE_PT = 70.0
+TAG_ROOM_CONTEXT_PENALTY_PT = 35.0
+TAG_DUPLICATE_DISTANCE_PT = 10.0
+
+# Arc geometry. These are intentionally broad because drawings can be at mixed scales.
+ARC_MIN_RADIUS_PT = 10.0
+ARC_MAX_RADIUS_PT = 120.0
+ARC_MIN_SPAN_DEG = 48.0
+ARC_MAX_SPAN_DEG = 132.0
+ARC_MAX_RADIAL_RMS_RATIO = 0.035
+
+# A real swing has a radial leaf from the fitted circle center (hinge) to an arc endpoint.
+LEAF_LENGTH_RATIO_MIN = 0.62
+LEAF_LENGTH_RATIO_MAX = 1.42
+LEAF_CENTER_TOL_RATIO = 0.18
+LEAF_ENDPOINT_TOL_RATIO = 0.24
+LEAF_ANGLE_TOL_DEG = 18.0
+
+# Wall opening evidence.
+WALL_MIN_SEGMENT_PT = 18.0
+WALL_AXIS_TOL_PT = 1.7
+WALL_MERGE_TOL_PT = 2.5
+OPENING_MIN_WIDTH_PT = 12.0
+OPENING_MAX_WIDTH_PT = 125.0
+WALL_THICKNESS_MIN_PT = 2.0
+WALL_THICKNESS_MAX_PT = 24.0
+OPENING_CENTER_TOL_PT = 10.0
+OPENING_WIDTH_RATIO_MIN = 0.55
+OPENING_WIDTH_RATIO_MAX = 1.8
+OPENING_MATCH_RADIUS_RATIO = 1.35
+
+# Candidate dedupe / scoring.
+DEDUPE_CENTER_RATIO = 0.20
+DEDUPE_RADIUS_RATIO = 0.18
+CONFIRMED_MIN_SCORE = 0.78
+PROBABLE_MIN_SCORE = 0.58
+
+# Raster text visibility probe.
+VISIBILITY_GRID_COLS = 7
+VISIBILITY_GRID_ROWS = 4
+VISIBILITY_MIN_DARK = 2
+VISIBILITY_DARK_THRESHOLD = 150
+
+# Debug
+DEBUG_CROP_PADDING_PT = 18.0
+
+
+### debug_vectors.py
+from __future__ import annotations
+
+import argparse
+import json
+import pymupdf
+
+from pdf_reader import open_doc, page_drawings
+
+
+def pt(p):
+    return [round(p.x, 2), round(p.y, 2)]
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Dump vector primitives near a known real door.")
+    ap.add_argument("pdf")
+    ap.add_argument("--page", type=int, required=True, help="1-based page number")
+    ap.add_argument("--x", type=float, required=True)
+    ap.add_argument("--y", type=float, required=True)
+    ap.add_argument("--radius", type=float, default=90.0)
+    args = ap.parse_args()
+
+    doc = open_doc(args.pdf)
+    page = doc[args.page-1]
+    c = pymupdf.Point(args.x, args.y)
+    out = []
+    for pi, d in enumerate(page_drawings(page)):
+        rect = d.get("rect")
+        if rect is not None:
+            dx = max(rect.x0 - c.x, 0.0, c.x - rect.x1)
+            dy = max(rect.y0 - c.y, 0.0, c.y - rect.y1)
+            if (dx*dx + dy*dy) ** 0.5 > args.radius:
+                continue
+        items = []
+        for it in d.get("items", []):
+            kind = it[0]
+            row = [kind]
+            for v in it[1:]:
+                if isinstance(v, pymupdf.Point):
+                    row.append(pt(v))
+                elif isinstance(v, pymupdf.Rect):
+                    row.append([round(v.x0,2), round(v.y0,2), round(v.x1,2), round(v.y1,2)])
+                else:
+                    row.append(str(v))
+            items.append(row)
+        out.append({
+            "path": pi,
+            "rect": [round(rect.x0,2), round(rect.y0,2), round(rect.x1,2), round(rect.y1,2)] if rect else None,
+            "width": d.get("width"),
+            "color": d.get("color"),
+            "fill": d.get("fill"),
+            "items": items,
+        })
+    print(json.dumps(out, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
+
+### evaluate.py
+from __future__ import annotations
+
+import argparse
+import json
+import math
+
+
+def d(a, b):
+    return math.hypot(a[0]-b[0], a[1]-b[1])
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Evaluate detector output against manual ground truth.")
+    ap.add_argument("summary", help="out/summary.json")
+    ap.add_argument("ground_truth", help="JSON: {\"2\": [[x,y], ...], ...} in PDF coordinates")
+    ap.add_argument("--tol", type=float, default=35.0, help="matching tolerance in PDF points")
+    args = ap.parse_args()
+
+    with open(args.summary, encoding="utf-8") as f:
+        summary = json.load(f)
+    with open(args.ground_truth, encoding="utf-8") as f:
+        truth = json.load(f)
+
+    predictions = {}
+    for page in summary.get("pages", []):
+        pno = str(page["page"])
+        predictions[pno] = [
+            d["center"] for d in page.get("doors", [])
+            if d.get("tier") in ("confirmed", "probable")
+        ]
+
+    all_tp = all_fp = all_fn = 0
+    for pno in sorted(set(truth) | set(predictions), key=lambda x: int(x)):
+        gt = [list(map(float, p)) for p in truth.get(pno, [])]
+        pr = [list(map(float, p)) for p in predictions.get(pno, [])]
+        pairs = []
+        for gi, g in enumerate(gt):
+            for pi, p in enumerate(pr):
+                dd = d(g, p)
+                if dd <= args.tol:
+                    pairs.append((dd, gi, pi))
+        used_g = set(); used_p = set(); tp = 0
+        for dd, gi, pi in sorted(pairs):
+            if gi in used_g or pi in used_p:
+                continue
+            used_g.add(gi); used_p.add(pi); tp += 1
+        fp = len(pr)-tp
+        fn = len(gt)-tp
+        all_tp += tp; all_fp += fp; all_fn += fn
+        prec = tp/(tp+fp) if tp+fp else 1.0
+        rec = tp/(tp+fn) if tp+fn else 1.0
+        print(f"page {pno}: truth={len(gt):3d} detected={len(pr):3d} tp={tp:3d} fp={fp:3d} fn={fn:3d}  P={prec:.3f} R={rec:.3f}")
+
+    precision = all_tp/(all_tp+all_fp) if all_tp+all_fp else 1.0
+    recall = all_tp/(all_tp+all_fn) if all_tp+all_fn else 1.0
+    f1 = 2*precision*recall/(precision+recall) if precision+recall else 0.0
+    print(f"\nTOTAL: tp={all_tp} fp={all_fp} fn={all_fn} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+### geometry.py
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Iterable, Sequence
+
+import numpy as np
+import pymupdf
+
+
+@dataclass(frozen=True)
+class LineSeg:
+    p: pymupdf.Point
+    q: pymupdf.Point
+    path_index: int
+    width: float = 0.0
+
+    @property
+    def length(self) -> float:
+        return math.hypot(self.q.x - self.p.x, self.q.y - self.p.y)
+
+    @property
+    def midpoint(self) -> pymupdf.Point:
+        return pymupdf.Point((self.p.x + self.q.x) / 2.0, (self.p.y + self.q.y) / 2.0)
+
+
+@dataclass(frozen=True)
+class ArcCandidate:
+    center: pymupdf.Point
+    radius: float
+    span_deg: float
+    radial_rms: float
+    p0: pymupdf.Point
+    p1: pymupdf.Point
+    bbox: pymupdf.Rect
+    path_index: int
+    source: str
+
+
+def dist(a: pymupdf.Point, b: pymupdf.Point) -> float:
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def point_segment_distance(pt: pymupdf.Point, a: pymupdf.Point, b: pymupdf.Point) -> float:
+    vx, vy = b.x - a.x, b.y - a.y
+    wx, wy = pt.x - a.x, pt.y - a.y
+    vv = vx * vx + vy * vy
+    if vv <= 1e-9:
+        return dist(pt, a)
+    t = max(0.0, min(1.0, (wx * vx + wy * vy) / vv))
+    px, py = a.x + t * vx, a.y + t * vy
+    return math.hypot(pt.x - px, pt.y - py)
+
+
+def angle_between_deg(ax: float, ay: float, bx: float, by: float) -> float:
+    na = math.hypot(ax, ay)
+    nb = math.hypot(bx, by)
+    if na <= 1e-9 or nb <= 1e-9:
+        return 180.0
+    c = max(-1.0, min(1.0, (ax * bx + ay * by) / (na * nb)))
+    return math.degrees(math.acos(c))
+
+
+def sample_cubic(points: Sequence[pymupdf.Point], n: int = 21) -> list[pymupdf.Point]:
+    p0, p1, p2, p3 = points[:4]
+    out: list[pymupdf.Point] = []
+    for i in range(n):
+        t = i / (n - 1)
+        u = 1.0 - t
+        x = u**3 * p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t**3*p3.x
+        y = u**3 * p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t**3*p3.y
+        out.append(pymupdf.Point(x, y))
+    return out
+
+
+def fit_circle(points: Sequence[pymupdf.Point]):
+    if len(points) < 3:
+        return None
+    xy = np.array([[p.x, p.y] for p in points], dtype=float)
+    x = xy[:, 0]
+    y = xy[:, 1]
+    A = np.column_stack((2*x, 2*y, np.ones_like(x)))
+    b = x*x + y*y
+    try:
+        sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    cx, cy, c = sol
+    r2 = c + cx*cx + cy*cy
+    if r2 <= 0:
+        return None
+    r = math.sqrt(float(r2))
+    radial = np.sqrt((x-cx)**2 + (y-cy)**2)
+    rms = float(np.sqrt(np.mean((radial-r)**2)))
+    return pymupdf.Point(float(cx), float(cy)), r, rms
+
+
+def angular_span_deg(points: Sequence[pymupdf.Point], center: pymupdf.Point) -> float:
+    if len(points) < 2:
+        return 0.0
+    angles = [math.atan2(p.y-center.y, p.x-center.x) for p in points]
+    total = 0.0
+    prev = angles[0]
+    for cur in angles[1:]:
+        d = math.atan2(math.sin(cur-prev), math.cos(cur-prev))
+        total += d
+        prev = cur
+    return abs(math.degrees(total))
+
+
+def bbox_of_points(points: Iterable[pymupdf.Point]) -> pymupdf.Rect:
+    pts = list(points)
+    return pymupdf.Rect(
+        min(p.x for p in pts), min(p.y for p in pts),
+        max(p.x for p in pts), max(p.y for p in pts),
+    )
+
+
+def rect_center(r: pymupdf.Rect) -> pymupdf.Point:
+    return pymupdf.Point((r.x0+r.x1)/2.0, (r.y0+r.y1)/2.0)
+
+
+### matcher.py
+from __future__ import annotations
+
+import math
+import pymupdf
+
+from config import (
+    CONFIRMED_MIN_SCORE, PROBABLE_MIN_SCORE, TAG_MAX_DISTANCE_PT,
+    TAG_ROOM_CONTEXT_PENALTY_PT,
+)
+from geometry import dist, point_segment_distance
+
+
+def _tag_distance_to_symbol(tag: dict, symbol: dict) -> float:
+    p = tag["point"]
+    # Door tags can be placed near either the swing or leaf, not necessarily the hinge.
+    d_center = dist(p, symbol["center"])
+    d_hinge = dist(p, symbol["hinge"])
+    d_leaf = point_segment_distance(p, symbol["leaf"].p, symbol["leaf"].q)
+    return min(d_center, d_hinge, d_leaf)
+
+
+def _tier(score: float) -> str:
+    if score >= CONFIRMED_MIN_SCORE:
+        return "confirmed"
+    if score >= PROBABLE_MIN_SCORE:
+        return "probable"
+    return "weak"
+
+
+def build_doors(symbols: list[dict]) -> list[dict]:
+    doors = []
+    for s in symbols:
+        doors.append({
+            "hinge": s["hinge"],
+            "center": s["center"],
+            "radius": round(s["radius"], 2),
+            "span_deg": round(s["span_deg"], 1),
+            "arc_rms": round(s["arc_rms"], 3),
+            "arc_bbox": s["arc_bbox"],
+            "arc_source": s["arc_source"],
+            "leaf": s["leaf"],
+            "opening": s["opening"],
+            "score": round(s["score"], 3),
+            "tier": _tier(s["score"]),
+            "tag": None,
+            "tag_distance": None,
+        })
+    return doors
+
+
+def attach_tags(doors: list[dict], candidates: list[dict]) -> list[dict]:
+    # Greedy global matching sorted by best score avoids one nearby door stealing
+    # a tag that is clearly closer to another door.
+    pairs = []
+    for di, d in enumerate(doors):
+        if d["tier"] == "weak":
+            continue
+        for ti, t in enumerate(candidates):
+            raw = _tag_distance_to_symbol(t, d)
+            if raw > TAG_MAX_DISTANCE_PT:
+                continue
+            cost = raw + (TAG_ROOM_CONTEXT_PENALTY_PT if t["room_context"] else 0.0)
+            pairs.append((cost, raw, di, ti))
+
+    used_d = set(); used_t = set()
+    for cost, raw, di, ti in sorted(pairs):
+        if di in used_d or ti in used_t:
+            continue
+        doors[di]["tag"] = candidates[ti]["text"]
+        doors[di]["tag_distance"] = round(raw, 1)
+        used_d.add(di); used_t.add(ti)
+    return doors
+
+
+def serializable_door(d: dict) -> dict:
+    out = {
+        "hinge": [round(d["hinge"].x, 1), round(d["hinge"].y, 1)],
+        "center": [round(d["center"].x, 1), round(d["center"].y, 1)],
+        "radius": d["radius"],
+        "span_deg": d["span_deg"],
+        "arc_rms": d["arc_rms"],
+        "arc_source": d["arc_source"],
+        "score": d["score"],
+        "tier": d["tier"],
+        "tag": d["tag"],
+        "tag_distance": d["tag_distance"],
+        "leaf": {
+            "p": [round(d["leaf"].p.x, 1), round(d["leaf"].p.y, 1)],
+            "q": [round(d["leaf"].q.x, 1), round(d["leaf"].q.y, 1)],
+            "length": round(d["leaf"].length, 1),
+        },
+        "opening": None,
+    }
+    if d["opening"] is not None:
+        o = d["opening"]
+        out["opening"] = {
+            "center": [round(o["center"].x, 1), round(o["center"].y, 1)],
+            "width": round(o["width"], 1),
+            "axis": o["axis"],
+            "wall_thickness": round(o["wall_thickness"], 1),
+        }
+    return out
+
+
+### noise.py
+# kills the false positives that repeat on every sheet. title block
+# symbols, north arrows and key plans print at identical coordnates on
+# all pages, a real door opening never does that
+from config import STATIC_MIN_PAGES, STATIC_SNAP_PT
+
+
+def _key(d):
+    return (round(d["x"] / STATIC_SNAP_PT), round(d["y"] / STATIC_SNAP_PT))
+
+
+def drop_sheet_furniture(pages_doors):
+    # pass 1: count how many sheets each untagged detection sits on
+    seen = {}
+    for pno, doors in pages_doors.items():
+        for d in doors:
+            if d["tag"]:
+                continue
+            seen.setdefault(_key(d), set()).add(pno)
+    static_keys = {k for k, pages in seen.items() if len(pages) >= STATIC_MIN_PAGES}
+
+    # pass 2: rebuild the door lists without the furniture
+    cleaned = {}
+    dropped = 0
+    for pno, doors in pages_doors.items():
+        keep = []
+        for d in doors:
+            if not d["tag"] and _key(d) in static_keys:
+                dropped += 1
+                continue
+            keep.append(d)
+        cleaned[pno] = keep
+    return cleaned, dropped
+
+### page_space.py
+from __future__ import annotations
+
+import pymupdf
+
+
+class PageSpace:
+    """Maps PyMuPDF's unrotated page coordinates to the rendered pixmap."""
+
+    def __init__(self, page: pymupdf.Page, dpi: int):
+        self.page = page
+        self.scale = dpi / 72.0
+        self.rotation = page.rotation_matrix
+
+    def point_to_display(self, p: pymupdf.Point) -> pymupdf.Point:
+        return p * self.rotation
+
+    def rect_to_display(self, r: pymupdf.Rect) -> pymupdf.Rect:
+        return r * self.rotation
+
+    def point_to_pixel(self, p: pymupdf.Point) -> tuple[float, float]:
+        rp = self.point_to_display(p)
+        return rp.x * self.scale, rp.y * self.scale
+
+    def rect_to_pixel(self, r: pymupdf.Rect) -> tuple[float, float, float, float]:
+        rr = self.rect_to_display(r)
+        return rr.x0*self.scale, rr.y0*self.scale, rr.x1*self.scale, rr.y1*self.scale
+
+
+### pdf_reader.py
+from __future__ import annotations
+
+import pymupdf
+
+
+def open_doc(pdf_path: str) -> pymupdf.Document:
+    return pymupdf.open(pdf_path)
+
+
+def page_text_spans(page: pymupdf.Page) -> list[dict]:
+    spans: list[dict] = []
+    raw = page.get_text("dict")
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            line_spans = line.get("spans", [])
+            line_text = "".join(s.get("text", "") for s in line_spans).strip()
+            direction = tuple(line.get("dir", (1.0, 0.0)))
+            for span in line_spans:
+                txt = span.get("text", "").strip()
+                if not txt:
+                    continue
+                x0, y0, x1, y1 = span["bbox"]
+                spans.append({
+                    "text": txt,
+                    "x": (x0+x1)/2.0,
+                    "y": (y0+y1)/2.0,
+                    "bbox": pymupdf.Rect(x0, y0, x1, y1),
+                    "size": float(span.get("size", 0.0)),
+                    "line_text": line_text,
+                    "dir": direction,
+                })
+    return spans
+
+
+def page_drawings(page: pymupdf.Page) -> list[dict]:
+    return page.get_drawings(extended=False)
+
+
+def render_page(page: pymupdf.Page, dpi: int) -> pymupdf.Pixmap:
+    # get_pixmap applies page rotation. PageSpace maps vector/text coordinates to it.
+    return page.get_pixmap(dpi=dpi, alpha=False)
+
+
+### README.md
+# Vector-first floor-plan door detector
+
+This rebuild fixes the main structural errors in the earlier experiment:
+
+- **Geometry creates doors; text only labels them.**
+- A swing door is modeled correctly: the **hinge is the fitted circle center**, and the door leaf is a **radial line from the hinge to an arc endpoint**.
+- Cubic Bezier arcs are fitted to circles; flattened/polyline arcs have a fallback detector.
+- Wall-opening evidence requires a matching gap on **two nearby parallel wall faces**, instead of grouping unrelated lines across the whole sheet.
+- Candidate duplicates are clustered by hinge/radius.
+- Page rotation is handled explicitly when mapping PDF coordinates to rendered PNG pixels.
+- Only enlarged floor-plan sheets are processed; `OVERALL FLOOR PLAN` sheets are skipped.
+- Cross-sheet repeated tags are reported as **review flags**, not automatically called contradictions.
+
+## Run
+
+```bash
+python -m pip install -r requirements.txt
+python run.py floorplan.pdf
+```
+
+Outputs go to `out/`:
+
+- `page_XX_doors.png`
+- `summary.json`
+
+Red = confirmed, orange = probable. Weak candidates are retained in JSON for debugging but are not drawn.
+
+## Important validation step
+
+This code is structurally fixed, but no detector should be called "perfect" without measuring it against the actual PDF. On your machine, run it on the source `floorplan.pdf`, inspect the six enlarged sheets, and tune only after measuring false positives / misses.
+
+If a real door is still missed, inspect how that exact symbol is encoded instead of guessing:
+
+```bash
+python debug_vectors.py floorplan.pdf --page 2 --x 600 --y 900 --radius 100 > door_debug.json
+```
+
+Use PDF coordinates from a nearby detected text span or PyMuPDF inspection. The dump will show whether that architect exported the swing as cubic curves, flattened lines, rectangles, or another primitive.
+
+## Why this version should behave very differently
+
+The previous detector assumed a door leaf began at an **arc endpoint**. For a normal swing symbol that is wrong: the hinge is the **center of the swing circle**. This version fits the circle, finds the hinge, then looks for the radial leaf.
+
+It also no longer treats a lone curve, lone numeric label, or lone wall gap as a door.
+
+## Measure it instead of eyeballing it
+
+Create a small `ground_truth.json` in PDF coordinates:
+
+```json
+{
+  "2": [[510.2, 431.8], [621.0, 447.2]],
+  "3": [[...]]
+}
+```
+
+Then run:
+
+```bash
+python evaluate.py out/summary.json ground_truth.json --tol 35
+```
+
+This prints per-sheet and total precision / recall / F1. Do not claim 100% or "every door" in the recording unless this measurement actually supports it.
+
+
+### reconcile.py
+from __future__ import annotations
+
+from collections import defaultdict
+
+
+def reconcile(pages: dict[int, list[dict]]) -> dict:
+    per_sheet = defaultdict(list)
+    pages_per_tag = defaultdict(set)
+    for pno, doors in pages.items():
+        for d in doors:
+            if d["tier"] == "weak" or not d["tag"]:
+                continue
+            per_sheet[(pno, d["tag"])].append(d)
+            pages_per_tag[d["tag"]].add(pno)
+
+    within_sheet = {
+        f"sheet{pno}_tag{tag}": len(items)
+        for (pno, tag), items in per_sheet.items() if len(items) > 1
+    }
+    repeated_across_sheets = {
+        tag: sorted(pages)
+        for tag, pages in pages_per_tag.items() if len(pages) > 1
+    }
+    return {
+        "unique_tags": len(pages_per_tag),
+        "tags_repeated_on_one_sheet": within_sheet,
+        # This is a review flag, not automatically a contradiction: enlarged areas may overlap.
+        "tags_seen_on_multiple_enlarged_sheets": repeated_across_sheets,
+    }
+
+
+### requirements.txt
+PyMuPDF>=1.26
+Pillow>=10.0
+numpy>=1.26
+
+
+### run.py
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+
+from config import OUT_DIR, RENDER_DPI
+from matcher import attach_tags, build_doors, serializable_door
+from page_space import PageSpace
+from pdf_reader import open_doc, page_drawings, page_text_spans, render_page
+from reconcile import reconcile
+from shape_finder import find_door_symbols
+from sheet_selector import page_identity, should_process
+from tag_finder import find_tag_candidates
+from visualizer import annotate_page
+
+
+def main(pdf_path: str, out_dir: str = OUT_DIR, dpi: int = RENDER_DPI):
+    started = time.perf_counter()
+    os.makedirs(out_dir, exist_ok=True)
+    doc = open_doc(pdf_path)
+
+    page_doors: dict[int, list[dict]] = {}
+    report = []
+
+    for idx in range(len(doc)):
+        page_no = idx + 1
+        page = doc[idx]
+        ident = page_identity(page)
+        if not should_process(page):
+            print(f"sheet {page_no}: skipped ({'overall' if ident['is_overall'] else 'not enlarged'})")
+            continue
+
+        pix = render_page(page, dpi)
+        space = PageSpace(page, dpi)
+        spans = page_text_spans(page)
+        tags = find_tag_candidates(spans, pix, space)
+        symbols, openings = find_door_symbols(page_drawings(page))
+        doors = attach_tags(build_doors(symbols), tags)
+        page_doors[page_no] = doors
+
+        confirmed = sum(d["tier"] == "confirmed" for d in doors)
+        probable = sum(d["tier"] == "probable" for d in doors)
+        weak = sum(d["tier"] == "weak" for d in doors)
+        tagged = sum(bool(d["tag"]) for d in doors if d["tier"] != "weak")
+        print(
+            f"sheet {page_no}: {len(symbols)} geometry candidates, {len(openings)} paired wall openings -> "
+            f"{confirmed} confirmed, {probable} probable, {weak} weak, {tagged} tagged"
+        )
+
+        img_path = annotate_page(pix, space, doors, page_no, out_dir)
+        report.append({
+            "page": page_no,
+            "labels": ident["labels"],
+            "rotation": page.rotation,
+            "geometry_candidates": len(symbols),
+            "paired_wall_openings": len(openings),
+            "confirmed": confirmed,
+            "probable": probable,
+            "weak": weak,
+            "tagged": tagged,
+            "image": img_path,
+            "doors": [serializable_door(d) for d in doors],
+        })
+
+    recon = reconcile(page_doors)
+    elapsed = time.perf_counter() - started
+    summary = {
+        "pdf": os.path.basename(pdf_path),
+        "processed_enlarged_sheets": sorted(page_doors),
+        "runtime_seconds": round(elapsed, 2),
+        "total_confirmed": sum(p["confirmed"] for p in report),
+        "total_probable": sum(p["probable"] for p in report),
+        "unique_tags": recon["unique_tags"],
+        "tags_repeated_on_one_sheet": recon["tags_repeated_on_one_sheet"],
+        "tags_seen_on_multiple_enlarged_sheets": recon["tags_seen_on_multiple_enlarged_sheets"],
+        "pages": report,
+    }
+    summary_path = os.path.join(out_dir, "summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    print(f"\nprocessed enlarged sheets: {sorted(page_doors)}")
+    print(f"total confirmed: {summary['total_confirmed']}")
+    print(f"total probable: {summary['total_probable']}")
+    print(f"runtime: {elapsed:.2f}s")
+    print(f"output: {summary_path}")
+    return summary
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Vector-first architectural door detector")
+    ap.add_argument("pdf")
+    ap.add_argument("--out", default=OUT_DIR)
+    ap.add_argument("--dpi", type=int, default=RENDER_DPI)
+    args = ap.parse_args()
+    main(args.pdf, args.out, args.dpi)
+
+
+### shape_finder.py
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+
+import pymupdf
+
+from config import (
+    ARC_MAX_RADIAL_RMS_RATIO, ARC_MAX_RADIUS_PT, ARC_MAX_SPAN_DEG,
+    ARC_MIN_RADIUS_PT, ARC_MIN_SPAN_DEG, DEDUPE_CENTER_RATIO,
+    DEDUPE_RADIUS_RATIO, LEAF_ANGLE_TOL_DEG, LEAF_CENTER_TOL_RATIO,
+    LEAF_ENDPOINT_TOL_RATIO, LEAF_LENGTH_RATIO_MAX, LEAF_LENGTH_RATIO_MIN,
+    OPENING_CENTER_TOL_PT, OPENING_MATCH_RADIUS_RATIO,
+    OPENING_MAX_WIDTH_PT, OPENING_MIN_WIDTH_PT, OPENING_WIDTH_RATIO_MAX,
+    OPENING_WIDTH_RATIO_MIN, WALL_AXIS_TOL_PT, WALL_MERGE_TOL_PT,
+    WALL_MIN_SEGMENT_PT, WALL_THICKNESS_MAX_PT, WALL_THICKNESS_MIN_PT,
+)
+from geometry import (
+    ArcCandidate, LineSeg, angle_between_deg, angular_span_deg, bbox_of_points,
+    dist, fit_circle, point_segment_distance, sample_cubic,
+)
+
+
+def _rect_edges(r: pymupdf.Rect, path_idx: int, width: float) -> list[LineSeg]:
+    p00 = pymupdf.Point(r.x0, r.y0)
+    p10 = pymupdf.Point(r.x1, r.y0)
+    p11 = pymupdf.Point(r.x1, r.y1)
+    p01 = pymupdf.Point(r.x0, r.y1)
+    return [
+        LineSeg(p00, p10, path_idx, width), LineSeg(p10, p11, path_idx, width),
+        LineSeg(p11, p01, path_idx, width), LineSeg(p01, p00, path_idx, width),
+    ]
+
+
+def collect_lines(drawings: list[dict]) -> list[LineSeg]:
+    lines: list[LineSeg] = []
+    for path_idx, d in enumerate(drawings):
+        width = float(d.get("width", 0.0) or 0.0)
+        for item in d.get("items", []):
+            kind = item[0]
+            if kind == "l" and len(item) >= 3:
+                lines.append(LineSeg(item[1], item[2], path_idx, width))
+            elif kind == "re" and len(item) >= 2:
+                lines.extend(_rect_edges(item[1], path_idx, width))
+    return lines
+
+
+def _cubic_arc_candidates(drawings: list[dict]) -> list[ArcCandidate]:
+    arcs: list[ArcCandidate] = []
+    for path_idx, d in enumerate(drawings):
+        for item in d.get("items", []):
+            if item[0] != "c" or len(item) < 5:
+                continue
+            ctrl = item[1:5]
+            pts = sample_cubic(ctrl, n=25)
+            fit = fit_circle(pts)
+            if fit is None:
+                continue
+            center, radius, rms = fit
+            if not (ARC_MIN_RADIUS_PT <= radius <= ARC_MAX_RADIUS_PT):
+                continue
+            if rms / radius > ARC_MAX_RADIAL_RMS_RATIO:
+                continue
+            span = angular_span_deg(pts, center)
+            if not (ARC_MIN_SPAN_DEG <= span <= ARC_MAX_SPAN_DEG):
+                continue
+            arcs.append(ArcCandidate(
+                center=center,
+                radius=radius,
+                span_deg=span,
+                radial_rms=rms,
+                p0=pts[0],
+                p1=pts[-1],
+                bbox=bbox_of_points(pts),
+                path_index=path_idx,
+                source="cubic",
+            ))
+    return arcs
+
+
+def _polyline_arc_candidates(drawings: list[dict]) -> list[ArcCandidate]:
+    """Fallback for CAD exports that flatten arcs into several short line pieces."""
+    arcs: list[ArcCandidate] = []
+    for path_idx, d in enumerate(drawings):
+        raw_lines = [it for it in d.get("items", []) if it[0] == "l" and len(it) >= 3]
+        if len(raw_lines) < 4:
+            continue
+        # Build simple contiguous chains in item order. CAD flattening usually keeps arc segments adjacent.
+        chain: list[pymupdf.Point] = []
+        chains: list[list[pymupdf.Point]] = []
+        for it in raw_lines:
+            a, b = it[1], it[2]
+            if not chain:
+                chain = [a, b]
+                continue
+            if dist(chain[-1], a) <= 1.5:
+                chain.append(b)
+            elif dist(chain[-1], b) <= 1.5:
+                chain.append(a)
+            else:
+                if len(chain) >= 5:
+                    chains.append(chain)
+                chain = [a, b]
+        if len(chain) >= 5:
+            chains.append(chain)
+
+        for pts in chains:
+            fit = fit_circle(pts)
+            if fit is None:
+                continue
+            center, radius, rms = fit
+            if not (ARC_MIN_RADIUS_PT <= radius <= ARC_MAX_RADIUS_PT):
+                continue
+            if rms / radius > 0.025:
+                continue
+            span = angular_span_deg(pts, center)
+            if not (ARC_MIN_SPAN_DEG <= span <= ARC_MAX_SPAN_DEG):
+                continue
+            arcs.append(ArcCandidate(
+                center=center, radius=radius, span_deg=span, radial_rms=rms,
+                p0=pts[0], p1=pts[-1], bbox=bbox_of_points(pts),
+                path_index=path_idx, source="polyline",
+            ))
+    return arcs
+
+
+def _best_leaf(arc: ArcCandidate, lines: list[LineSeg]):
+    """Find the radial door leaf: center/hinge -> one arc endpoint.
+
+    The previous implementation looked for a line starting at the *arc endpoint*.
+    That is geometrically wrong: the hinge is the fitted circle center.
+    """
+    best = None
+    best_score = -1.0
+    center_tol = max(3.0, arc.radius * LEAF_CENTER_TOL_RATIO)
+    end_tol = max(4.0, arc.radius * LEAF_ENDPOINT_TOL_RATIO)
+
+    for ln in lines:
+        if ln.length <= 1e-6:
+            continue
+        ratio = ln.length / arc.radius
+        if not (LEAF_LENGTH_RATIO_MIN <= ratio <= LEAF_LENGTH_RATIO_MAX):
+            continue
+
+        for near, far in ((ln.p, ln.q), (ln.q, ln.p)):
+            dc = dist(near, arc.center)
+            if dc > center_tol:
+                continue
+            d0 = dist(far, arc.p0)
+            d1 = dist(far, arc.p1)
+            endpoint = arc.p0 if d0 <= d1 else arc.p1
+            de = min(d0, d1)
+            if de > end_tol:
+                continue
+            avx, avy = endpoint.x-arc.center.x, endpoint.y-arc.center.y
+            lvx, lvy = far.x-near.x, far.y-near.y
+            angle = angle_between_deg(avx, avy, lvx, lvy)
+            if angle > LEAF_ANGLE_TOL_DEG:
+                continue
+            score = (
+                1.0
+                - 0.40*(dc/center_tol)
+                - 0.35*(de/end_tol)
+                - 0.25*(angle/LEAF_ANGLE_TOL_DEG)
+            )
+            if score > best_score:
+                best_score = score
+                best = {"line": ln, "near": near, "far": far, "score": score}
+    return best
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[list[float]]:
+    if not intervals:
+        return []
+    intervals = sorted(intervals)
+    out = [[intervals[0][0], intervals[0][1]]]
+    for a, b in intervals[1:]:
+        if a <= out[-1][1] + WALL_MERGE_TOL_PT:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _axis_gaps(lines: list[LineSeg]):
+    horiz = defaultdict(list)
+    vert = defaultdict(list)
+    for ln in lines:
+        dx = abs(ln.p.x-ln.q.x)
+        dy = abs(ln.p.y-ln.q.y)
+        if dx < WALL_MIN_SEGMENT_PT and dy < WALL_MIN_SEGMENT_PT:
+            continue
+        if dy <= WALL_AXIS_TOL_PT and dx >= WALL_MIN_SEGMENT_PT:
+            y = round(((ln.p.y+ln.q.y)/2.0) / WALL_AXIS_TOL_PT) * WALL_AXIS_TOL_PT
+            horiz[y].append((min(ln.p.x, ln.q.x), max(ln.p.x, ln.q.x)))
+        elif dx <= WALL_AXIS_TOL_PT and dy >= WALL_MIN_SEGMENT_PT:
+            x = round(((ln.p.x+ln.q.x)/2.0) / WALL_AXIS_TOL_PT) * WALL_AXIS_TOL_PT
+            vert[x].append((min(ln.p.y, ln.q.y), max(ln.p.y, ln.q.y)))
+
+    gaps = []
+    for axis, groups in (("h", horiz), ("v", vert)):
+        for coord, segs in groups.items():
+            merged = _merge_intervals(segs)
+            for left, right in zip(merged, merged[1:]):
+                width = right[0]-left[1]
+                if not (OPENING_MIN_WIDTH_PT <= width <= OPENING_MAX_WIDTH_PT):
+                    continue
+                center_axis = (left[1]+right[0])/2.0
+                if axis == "h":
+                    center = pymupdf.Point(center_axis, coord)
+                else:
+                    center = pymupdf.Point(coord, center_axis)
+                gaps.append({"axis": axis, "coord": coord, "center": center, "width": width})
+    return gaps
+
+
+def find_wall_openings(lines: list[LineSeg]) -> list[dict]:
+    """Require the same gap on two nearby parallel wall faces.
+
+    This avoids the old page-wide 'any two collinear lines create a gap' problem.
+    """
+    gaps = _axis_gaps(lines)
+    openings = []
+    used = set()
+    for i, a in enumerate(gaps):
+        if i in used:
+            continue
+        best_j = None
+        best_score = float("inf")
+        for j in range(i+1, len(gaps)):
+            b = gaps[j]
+            if b["axis"] != a["axis"]:
+                continue
+            thickness = abs(b["coord"]-a["coord"])
+            if not (WALL_THICKNESS_MIN_PT <= thickness <= WALL_THICKNESS_MAX_PT):
+                continue
+            if a["axis"] == "h":
+                center_delta = abs(a["center"].x-b["center"].x)
+            else:
+                center_delta = abs(a["center"].y-b["center"].y)
+            if center_delta > OPENING_CENTER_TOL_PT:
+                continue
+            wr = b["width"] / max(a["width"], 1e-6)
+            if not (OPENING_WIDTH_RATIO_MIN <= wr <= OPENING_WIDTH_RATIO_MAX):
+                continue
+            score = center_delta + abs(1.0-wr)*10.0 + thickness*0.05
+            if score < best_score:
+                best_score = score
+                best_j = j
+        if best_j is None:
+            continue
+        b = gaps[best_j]
+        used.add(i); used.add(best_j)
+        center = pymupdf.Point(
+            (a["center"].x+b["center"].x)/2.0,
+            (a["center"].y+b["center"].y)/2.0,
+        )
+        openings.append({
+            "center": center,
+            "width": (a["width"]+b["width"])/2.0,
+            "axis": a["axis"],
+            "wall_thickness": abs(b["coord"]-a["coord"]),
+        })
+    return openings
+
+
+def _opening_support(arc: ArcCandidate, opening: dict | None) -> float:
+    if opening is None:
+        return 0.0
+    d = dist(arc.center, opening["center"])
+    max_d = max(10.0, arc.radius*OPENING_MATCH_RADIUS_RATIO)
+    if d > max_d:
+        return 0.0
+    width_ratio = opening["width"] / max(arc.radius, 1e-6)
+    if not (0.45 <= width_ratio <= 1.9):
+        return 0.0
+    return max(0.0, 1.0-d/max_d)
+
+
+def _nearest_opening(arc: ArcCandidate, openings: list[dict]):
+    best = None
+    best_d = float("inf")
+    for o in openings:
+        d = dist(arc.center, o["center"])
+        if d < best_d:
+            best = o; best_d = d
+    return best
+
+
+def _candidate_score(arc: ArcCandidate, leaf: dict, opening: dict | None) -> float:
+    arc_quality = max(0.0, 1.0 - (arc.radial_rms/max(arc.radius, 1e-6))/max(ARC_MAX_RADIAL_RMS_RATIO, 1e-6))
+    span_quality = max(0.0, 1.0 - abs(arc.span_deg-90.0)/55.0)
+    leaf_quality = max(0.0, min(1.0, leaf["score"]))
+    opening_quality = _opening_support(arc, opening)
+    # Arc + leaf are mandatory; wall opening raises confidence but is not mandatory
+    # because renovation plans can have fragmented wall vectors.
+    return 0.28*arc_quality + 0.18*span_quality + 0.38*leaf_quality + 0.16*opening_quality
+
+
+def _dedupe(cands: list[dict]) -> list[dict]:
+    ordered = sorted(cands, key=lambda c: c["score"], reverse=True)
+    keep: list[dict] = []
+    for c in ordered:
+        duplicate = False
+        for k in keep:
+            max_r = max(c["radius"], k["radius"])
+            if dist(c["hinge"], k["hinge"]) > max(3.0, max_r*DEDUPE_CENTER_RATIO):
+                continue
+            if abs(c["radius"]-k["radius"]) > max_r*DEDUPE_RADIUS_RATIO:
+                continue
+            duplicate = True
+            break
+        if not duplicate:
+            keep.append(c)
+    return keep
+
+
+def find_door_symbols(drawings: list[dict]) -> tuple[list[dict], list[dict]]:
+    lines = collect_lines(drawings)
+    openings = find_wall_openings(lines)
+    arcs = _cubic_arc_candidates(drawings) + _polyline_arc_candidates(drawings)
+
+    candidates: list[dict] = []
+    for arc in arcs:
+        leaf = _best_leaf(arc, lines)
+        if leaf is None:
+            continue
+        opening = _nearest_opening(arc, openings)
+        score = _candidate_score(arc, leaf, opening)
+        candidates.append({
+            "hinge": arc.center,
+            "center": pymupdf.Point((arc.bbox.x0+arc.bbox.x1)/2.0, (arc.bbox.y0+arc.bbox.y1)/2.0),
+            "radius": arc.radius,
+            "span_deg": arc.span_deg,
+            "arc_rms": arc.radial_rms,
+            "arc_bbox": arc.bbox,
+            "arc_source": arc.source,
+            "leaf": leaf["line"],
+            "leaf_score": leaf["score"],
+            "opening": opening if _opening_support(arc, opening) > 0 else None,
+            "score": score,
+        })
+
+    return _dedupe(candidates), openings
+
+
+### sheet_selector.py
+from __future__ import annotations
+
+from config import ENLARGED_TITLE_RE, OVERALL_TITLE_RE, SHEET_LABEL_RE
+
+
+def page_identity(page) -> dict:
+    text = page.get_text("text")
+    upper = text.upper()
+    labels = SHEET_LABEL_RE.findall(upper)
+    return {
+        "text": text,
+        "labels": labels,
+        "is_overall": bool(OVERALL_TITLE_RE.search(upper)),
+        "is_enlarged": bool(ENLARGED_TITLE_RE.search(upper)),
+    }
+
+
+def should_process(page) -> bool:
+    ident = page_identity(page)
+    if ident["is_overall"]:
+        return False
+    if ident["is_enlarged"]:
+        return True
+    # Fallback for these sheets if title text extraction is fragmented.
+    return bool(ident["labels"])
+
+
+### tag_finder.py
+from __future__ import annotations
+
+import re
+
+from config import TAG_DUPLICATE_DISTANCE_PT, TAG_PATTERN
+from geometry import dist
+from visibility import make_probe, span_is_visible
+import pymupdf
+
+
+_ROOM_WORD_RE = re.compile(
+    r"\b(ROOM|TOILET|CIRCULATION|STORAGE|OFFICE|CLEAN|SOILED|PRE[- ]?OP|PACU|"
+    r"WORKSTATION|CORRIDOR|HALL|LOBBY|STAIR|ELEVATOR|EQUIPMENT|OPERATING|RECOVERY|"
+    r"SUPPLY|LOCKER|WAITING|NUTRITION|STERILE|SCRUB|HANDWASH|BREAKOUT)\b",
+    re.I,
+)
+
+
+def _room_context(span: dict, spans: list[dict]) -> bool:
+    # Room numbers are often directly under / beside a room-name line. This is a
+    # penalty only; geometry still gets the final say.
+    p = pymupdf.Point(span["x"], span["y"])
+    for s in spans:
+        if s is span:
+            continue
+        txt = s["text"]
+        if not _ROOM_WORD_RE.search(txt):
+            continue
+        q = pymupdf.Point(s["x"], s["y"])
+        if dist(p, q) <= 34:
+            return True
+    return False
+
+
+def find_tag_candidates(spans, pix, page_space) -> list[dict]:
+    probe = make_probe(pix) if pix is not None else None
+    out: list[dict] = []
+    for s in spans:
+        txt = s["text"].strip().upper()
+        if not TAG_PATTERN.fullmatch(txt):
+            continue
+        # Exclude obvious scale / area / dimension contexts.
+        line_upper = s.get("line_text", "").upper()
+        if any(tok in line_upper for tok in (" SQ FT", " SF", "CLR", "TYP", "A2.", "A6.")):
+            continue
+        if probe is not None and not span_is_visible(probe, s["bbox"], page_space):
+            continue
+
+        p = pymupdf.Point(s["x"], s["y"])
+        duplicate = False
+        for c in out:
+            if c["text"] == txt and dist(p, c["point"]) <= TAG_DUPLICATE_DISTANCE_PT:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+
+        out.append({
+            "text": txt,
+            "point": p,
+            "bbox": s["bbox"],
+            "size": s["size"],
+            "room_context": _room_context(s, spans),
+        })
+    return out
+
+
+### visibility.py
+from __future__ import annotations
+
+from config import (
+    VISIBILITY_DARK_THRESHOLD, VISIBILITY_GRID_COLS,
+    VISIBILITY_GRID_ROWS, VISIBILITY_MIN_DARK,
+)
+
+
+def make_probe(pix):
+    return {
+        "buf": pix.samples,
+        "w": pix.width,
+        "h": pix.height,
+        "stride": pix.stride,
+        "n": pix.n,
+    }
+
+
+def _dark_at(probe, px: int, py: int) -> bool:
+    off = py*probe["stride"] + px*probe["n"]
+    b = probe["buf"]
+    # Pixmap is RGB because render_page(alpha=False).
+    return (
+        b[off] < VISIBILITY_DARK_THRESHOLD and
+        b[off+1] < VISIBILITY_DARK_THRESHOLD and
+        b[off+2] < VISIBILITY_DARK_THRESHOLD
+    )
+
+
+def span_is_visible(probe, bbox, page_space) -> bool:
+    x0, y0, x1, y1 = page_space.rect_to_pixel(bbox)
+    x0 = max(0, min(x0, probe["w"]-1))
+    x1 = max(0, min(x1, probe["w"]-1))
+    y0 = max(0, min(y0, probe["h"]-1))
+    y1 = max(0, min(y1, probe["h"]-1))
+    if x1-x0 < 2 or y1-y0 < 2:
+        return False
+
+    dark = 0
+    for ry in range(VISIBILITY_GRID_ROWS):
+        py = int(y0 + (ry+0.5)*(y1-y0)/VISIBILITY_GRID_ROWS)
+        for rx in range(VISIBILITY_GRID_COLS):
+            px = int(x0 + (rx+0.5)*(x1-x0)/VISIBILITY_GRID_COLS)
+            if _dark_at(probe, px, py):
+                dark += 1
+    return dark >= VISIBILITY_MIN_DARK
+
+
+### visualizer.py
+from __future__ import annotations
+
+import os
+from PIL import Image, ImageDraw, ImageFont
+import pymupdf
+
+from config import OUT_DIR
+
+
+TIER_COLOR = {
+    "confirmed": (220, 30, 30),
+    "probable": (245, 135, 20),
+    "weak": (140, 140, 140),
+}
+
+
+def _font():
+    try:
+        return ImageFont.truetype("arial.ttf", 13)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def annotate_page(pix, page_space, doors, page_no: int, out_dir: str = OUT_DIR) -> str:
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    draw = ImageDraw.Draw(img)
+    font = _font()
+
+    for d in doors:
+        if d["tier"] == "weak":
+            continue
+        color = TIER_COLOR[d["tier"]]
+        x0, y0, x1, y1 = page_space.rect_to_pixel(d["arc_bbox"])
+        pad = max(5, int(0.08*max(x1-x0, y1-y0)))
+        draw.ellipse([x0-pad, y0-pad, x1+pad, y1+pad], outline=color, width=3)
+
+        hx, hy = page_space.point_to_pixel(d["hinge"])
+        draw.ellipse([hx-3, hy-3, hx+3, hy+3], fill=color)
+
+        lp = page_space.point_to_pixel(d["leaf"].p)
+        lq = page_space.point_to_pixel(d["leaf"].q)
+        draw.line([lp, lq], fill=color, width=2)
+
+        label = d["tag"] or f"{d['score']:.2f}"
+        draw.text((x1+pad+4, max(0, y0-3)), label, fill=color, font=font)
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"page_{page_no:02d}_doors.png")
+    img.save(path)
+    return path
+

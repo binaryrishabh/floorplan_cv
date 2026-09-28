@@ -1,42 +1,37 @@
-# draws the findings back onto the rendered sheet so the output is
-# something a human can judge in two seconds flat
-import os
+from io import BytesIO
+from pathlib import Path
 from PIL import Image, ImageDraw
-from config import RENDER_DPI, OUT_DIR
-
-SCALE = RENDER_DPI / 72.0  # pdf points -> pixels
-
-
-def _save_with_retry(img, path, page_no):
-    # windows can refuse a write for dumb reasons: a stale viewer lock,
-    # onedrive sync gremlins, odd cwd. print the exact repr so any
-    # invisible char shows up, then retry once in a fresh folder
-    try:
-        img.save(path)
-        return path
-    except OSError as err:
-        print(f"  !! save failed: {err!r} on {path!r}")
-        retry_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out_retry")
-        os.makedirs(retry_dir, exist_ok=True)
-        retry_path = os.path.join(retry_dir, f"page_{page_no:02d}_doors.png")
-        img.save(retry_path)
-        print(f"  !! saved fallback copy at {retry_path}")
-        return retry_path
+from config import MARKER_RADIUS_PX
+from output_utils import safe_write_bytes
 
 
-def annotate_page(pix, doors, page_no):
-    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+def annotate_page(pix, space, doors, page_no, out_dir, review_candidates=None):
+    img = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
     draw = ImageDraw.Draw(img)
     for d in doors:
-        px, py = d["x"] * SCALE, d["y"] * SCALE
-        if d["tag"]:
-            r = 10
-            draw.ellipse([px - r, py - r, px + r, py + r], outline=(220, 30, 30), width=3)
-            draw.text((px + 12, py - 8), d["tag"], fill=(220, 30, 30))
-        else:
-            # untaged swing, magenta so it pops againt the red tags
-            r = 8
-            draw.ellipse([px - r, py - r, px + r, py + r], outline=(200, 40, 200), width=3)
-    os.makedirs(OUT_DIR, exist_ok=True)
-    path = os.path.join(OUT_DIR, f"page_{page_no:02d}_doors.png")
-    return _save_with_retry(img, path, page_no)
+        px, py = space.raw_to_pixel(d['x'], d['y'])
+        r = MARKER_RADIUS_PX
+        draw.ellipse((px-r, py-r, px+r, py+r), outline=(220,30,30), width=3)
+        # Only true fitted swing arcs have a meaningful hinge. For leaf-only
+        # recovery symbols a misleading hinge vector is worse than no vector.
+        if d.get('method') == 'swing_arc':
+            hx, hy = space.raw_to_pixel(d['hinge_x'], d['hinge_y'])
+            draw.line((hx, hy, px, py), fill=(220,30,30), width=2)
+        if d.get('tag'):
+            draw.text((px+r+3, py-r), d['tag'], fill=(220,30,30))
+    for d in (review_candidates or []):
+        px, py = space.raw_to_pixel(d['x'], d['y'])
+        r = MARKER_RADIUS_PX
+        draw.ellipse((px-r, py-r, px+r, py+r), outline=(235,140,20), width=2)
+        draw.text((px+r+3, py-r), 'review', fill=(235,140,20))
+
+    out = Path(out_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    preferred = out / f'page_{page_no:02d}_doors.png'
+
+    # Encode first, then use our Windows-safe writer. This avoids Pillow
+    # directly opening a stale/locked destination path.
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    actual = safe_write_bytes(preferred, buf.getvalue())
+    return str(actual)

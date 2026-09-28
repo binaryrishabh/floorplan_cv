@@ -1,3 +1,4 @@
-SourceCode
-out
-__pycache__
+out/
+__pycache__/
+*.pyc
+.venv/
