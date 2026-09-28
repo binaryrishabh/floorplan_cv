@@ -1,6 +1,6 @@
 # entry point: python run.py floorplan.pdf
-# prints a per sheet summary and drops annotated pngs + json in out/
-
+# two passes now: first collect doors per sheet, then kill the sheet
+# furniture false positives, then render + annotate + reconcile
 import json
 import os
 import sys
@@ -11,6 +11,7 @@ from pdf_reader import open_doc, page_text_spans, page_drawings, render_page
 from tag_finder import find_tags
 from shape_finder import find_swing_arcs, find_wall_gaps
 from matcher import match_doors
+from noise import drop_sheet_furniture
 from reconcile import reconcile
 from visualizer import annotate_page
 
@@ -18,48 +19,63 @@ from visualizer import annotate_page
 def main(pdf_path):
     started = time.perf_counter()
     doc = open_doc(pdf_path)
-    pages_doors = {}
-    report = []
 
+    # pass 1: pure extraction, no rendering yet
+    pages_doors = {}
+    raw_stats = {}
     for pno in range(len(doc)):
         page = doc[pno]
         drawings = page_drawings(page)
         tags = find_tags(page_text_spans(page))
         arcs = find_swing_arcs(drawings)
         gaps = find_wall_gaps(drawings)
-        doors = match_doors(tags, arcs, gaps)
-        pages_doors[pno + 1] = doors
+        pages_doors[pno + 1] = match_doors(tags, arcs, gaps)
+        raw_stats[pno + 1] = (len(tags), len(arcs), len(gaps))
 
-        pix = render_page(page, RENDER_DPI)
-        img_path = annotate_page(pix, doors, pno + 1)
+    # pass 2: throw out curves that repeat on 3+ sheets (title block etc)
+    cleaned, dropped = drop_sheet_furniture(pages_doors)
+
+    # pass 3: render, annotate, report
+    report = []
+    for pno in sorted(cleaned):
+        doors = cleaned[pno]
+        tags_n, arcs_n, gaps_n = raw_stats[pno]
+        pix = render_page(doc[pno - 1], RENDER_DPI)
+        img_path = annotate_page(pix, doors, pno)
         tagged = sum(1 for d in doors if d["tag"])
-        print(f"sheet {pno+1}: {len(tags)} tags, {len(arcs)} swings, "
-              f"{len(gaps)} wall gaps -> {tagged} tagged doors, "
-              f"{len(doors)-tagged} untaged openings")
+        print(f"sheet {pno}: {tags_n} tags, {arcs_n} swings, {gaps_n} wall gaps "
+              f"-> {tagged} tagged doors, {len(doors) - tagged} untaged openings")
         report.append({
-            "page": pno + 1,
-            "tags": len(tags),
-            "swing_arcs": len(arcs),
-            "wall_gaps": len(gaps),
+            "page": pno,
+            "tags": tags_n,
+            "swing_arcs": arcs_n,
+            "wall_gaps": gaps_n,
             "tagged_doors": tagged,
             "untaged_openings": len(doors) - tagged,
             "image": img_path,
             "doors": doors,
         })
 
-    recon = reconcile(pages_doors)
+    recon = reconcile(cleaned)
     elapsed = time.perf_counter() - started
     summary = {
         "pdf": os.path.basename(pdf_path),
         "sheets": len(doc),
-        "total_unique_tagged_doors": recon["unique_tags"],
-        "tags_on_multiple_sheets": recon["tags_on_multiple_sheets"],
+        "furniture_false_positives_dropped": dropped,
+        "unique_tags_on_enlarged_sheets": recon["unique_tags_on_enlarged"],
+        "tags_printed_twice_on_one_sheet": recon["tags_printed_twice_on_one_sheet"],
+        "tags_on_multiple_enlarged_sheets": recon["tags_on_multiple_enlarged_sheets"],
         "runtime_seconds": round(elapsed, 2),
         "pages": report,
     }
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
+
+    print(f"\ndropped {dropped} sheet-furniture false positives")
+    print(f"unique door tags on enlarged sheets: {recon['unique_tags_on_enlarged']}")
+    print(f"tags printed twice on one sheet: {len(recon['tags_printed_twice_on_one_sheet'])}")
+    print(f"tags seen on multiple enlarged sheets: {len(recon['tags_on_multiple_enlarged_sheets'])}")
     print(f"\ndone in {elapsed:.2f}s -> {OUT_DIR}\\summary.json + annotated pngs")
 
 

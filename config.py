@@ -1,6 +1,5 @@
 # global knobs for the floorplan experiment. tweak these when a new
 # bid set comes in with a different scale or tag style
-
 import re
 
 # door tags on these sheets look like 1400, 1422, 1403A. keynotes are 6
@@ -32,5 +31,14 @@ MATCH_RADIUS_PT = 90
 
 # short ticks and furniture lines just add noise to the wall graph
 WALL_MIN_LEN_PT = 60
+
+# sheet 1 is the overall plan. founder said ignore it for counting, we
+# keep it only as the tag universe / index
+OVERALL_PAGES = [1]
+
+# a curve printed at the same spot on 3+ sheets is sheet furniture like
+# titel block symbols or the north arrow, real doors never do that
+STATIC_MIN_PAGES = 3
+STATIC_SNAP_PT = 6
 
 OUT_DIR = "out"
