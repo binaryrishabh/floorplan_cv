@@ -6,7 +6,7 @@
 #   3. layout check: a number under a room name is a room number
 from config import TAG_PATTERN
 from badge_finder import tag_inside_badge
-from visibility import span_is_visible
+from visibility import make_probe, span_is_visible
 
 
 def _has_room_name_above(span, spans):
@@ -24,12 +24,15 @@ def _has_room_name_above(span, spans):
 
 
 def find_tags(spans, badges, pix, scale):
+    # one probe per page. the samples buffer is huge and copying it per
+    # span is exactly what made the last run hang like it was dead
+    probe = make_probe(pix) if pix is not None else None
     tags = []
     for s in spans:
         if not TAG_PATTERN.match(s["text"]):
             continue
         # no ink on the rendered sheet at this spot = ghost text
-        if pix is not None and not span_is_visible(pix, s["bbox"], scale):
+        if probe is not None and not span_is_visible(probe, s["bbox"], scale):
             continue
         # sometimes cad explodes a badge and the same number prints
         # twice a few points apart, collapse anything within 12pt
