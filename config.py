@@ -1,5 +1,6 @@
 # global knobs for the floorplan experiment. tweak these when a new
 # bid set comes in with a different scale or tag style
+import os
 import re
 
 # door tags on these sheets look like 1400, 1422, 1403A. keynotes are 6
@@ -41,4 +42,6 @@ OVERALL_PAGES = [1]
 STATIC_MIN_PAGES = 3
 STATIC_SNAP_PT = 6
 
-OUT_DIR = "out"
+# absolute out folder next to this file, so a wierd working directory
+# or a relative path tantrum from windows can never break the saves
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")

@@ -1,11 +1,27 @@
 # draws the findings back onto the rendered sheet so the output is
 # something a human can judge in two seconds flat
-
 import os
 from PIL import Image, ImageDraw
 from config import RENDER_DPI, OUT_DIR
 
 SCALE = RENDER_DPI / 72.0  # pdf points -> pixels
+
+
+def _save_with_retry(img, path, page_no):
+    # windows can refuse a write for dumb reasons: a stale viewer lock,
+    # onedrive sync gremlins, odd cwd. print the exact repr so any
+    # invisible char shows up, then retry once in a fresh folder
+    try:
+        img.save(path)
+        return path
+    except OSError as err:
+        print(f"  !! save failed: {err!r} on {path!r}")
+        retry_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out_retry")
+        os.makedirs(retry_dir, exist_ok=True)
+        retry_path = os.path.join(retry_dir, f"page_{page_no:02d}_doors.png")
+        img.save(retry_path)
+        print(f"  !! saved fallback copy at {retry_path}")
+        return retry_path
 
 
 def annotate_page(pix, doors, page_no):
@@ -23,5 +39,4 @@ def annotate_page(pix, doors, page_no):
             draw.ellipse([px - r, py - r, px + r, py + r], outline=(200, 40, 200), width=3)
     os.makedirs(OUT_DIR, exist_ok=True)
     path = os.path.join(OUT_DIR, f"page_{page_no:02d}_doors.png")
-    img.save(path)
-    return path
+    return _save_with_retry(img, path, page_no)

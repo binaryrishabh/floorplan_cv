@@ -18,6 +18,7 @@ from visualizer import annotate_page
 
 def main(pdf_path):
     started = time.perf_counter()
+    os.makedirs(OUT_DIR, exist_ok=True)
     doc = open_doc(pdf_path)
 
     # pass 1: pure extraction, no rendering yet
@@ -68,7 +69,6 @@ def main(pdf_path):
         "runtime_seconds": round(elapsed, 2),
         "pages": report,
     }
-    os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
